@@ -1,0 +1,305 @@
+--- ### Ansible Playbook für Konfiguration eines Offloader auf Basis eines Raspberry PI 4B
+- name: raspi_offloader.yml
+  hosts: raspberry-ansible
+  become: yes
+  become_user: root
+
+  vars:
+    fastd_ports:
+      muc_cty: 	30002
+      muc_nord: 30003
+      muc_ost: 	30004
+      muc_sued: 30005
+      muc_west: 30006
+      uml_nord: 30007
+      uml_ost: 	30008
+      uml_sued: 30009
+      uml_west: 30010
+      gauting: 	30012
+      freising: 30013
+      welt:     30011 
+    vxlan_ids:
+      muc_cty:  10758607
+      muc_nord: 15521492
+      muc_ost:  2948862
+      muc_sued: 8599288
+      muc_west: 7318933
+      uml_nord: 5705961
+      uml_ost:  4892713
+      uml_sued: 16544703
+      uml_west: 16677749
+      gauting:  16175732
+      freising: 12937858
+      welt:     16306234
+
+  vars_prompt:
+    - name: batman_adv_version
+      prompt: "\nWas ist die aktuelle BATMAN Version, die hier\nhttps://downloads.open-mesh.org/batman/releases/ gelistet ist?             "
+      private: no
+
+    - name: ffmuc_segment
+      prompt: "\nIn welchem der Segmente hier soll der Offloader betrieben werden: \n                                                                  muc_cty \n                                                                  muc_nord \n                                                                  muc_ost \n                                                                  muc_sued \n                                                                  muc_west \n                                                                  uml_nord \n                                                                  uml_ost \n                                                                  uml_sued \n                                                                  uml_west \n                                                                  gauting \n                                                                  freising \n                                                                  welt     "
+      private: no
+
+    - name: raspberry_hostname
+      prompt: "\nWie lautet der Hostname des Raspberry Offloaders?                          "
+      private: no
+
+    - name: node_contact_address
+      prompt: "\nWie lautet die Kontakt-Adresse des Node-Betreibers?                        "
+      private: no
+
+    - name: raspberry_latitude
+      prompt: "\nWie lautet der Geographische Breitengrad des Raspberry Offloaders?         "
+      private: no
+
+    - name: raspberry_longitude
+      prompt: "\nWie lautet der Geographische Längengrad des Raspberry Offloaders?          "
+      private: no
+
+    - name: raspberry_wifi
+      prompt: "\nSoll der Raspberry Offloader auch ein WLAN ausstrahlen, 'ja'?              " 
+      private: no
+
+    - name: raspberry_clientvlan
+      prompt: "\nSoll der Raspberry Offloader ein Client-VLAN zur Verfügung stellen?\n                                   Wenn ja, wie lautet die VLAN-ID?        "
+      private: no
+
+    - name: raspberry_meshvlan
+      prompt: "\nSoll der Raspberry Offloader ein Mesh-VLAN zur Verfügung stellen?\n                                   Wenn ja, wie lautet die VLAN-ID?        "
+      private: no
+
+  tasks:
+    - name: Hostname ändern
+      shell: hostnamectl set-hostname {{ raspberry_hostname }}
+
+    - name: Anpassung /etc/hosts
+      template:
+        src: Raspbian/hosts.j2
+        dest: /etc/hosts
+
+    - name: Beschreibung des User 'pi' anpassen
+      user:
+        name: pi
+        comment: "Raspbian System User"
+        state: present
+
+    - name: Update und Upgrade der APT-Pakete
+      apt:
+        upgrade: dist
+        update_cache: yes
+
+    - name: Reboot nach update
+      reboot:
+
+    - name: Download des aktuellen BATMAN Archives 
+      get_url:
+        url: https://downloads.open-mesh.org/batman/releases/batman-adv-{{ batman_adv_version }}/batman-adv-{{ batman_adv_version }}.tar.gz
+        dest: /usr/src/batman-adv-{{ batman_adv_version }}.tar.gz
+        mode: '0644'
+
+    - name: BATMAN-Archiv entpacken
+      unarchive:
+        src: /usr/src/batman-adv-{{ batman_adv_version }}.tar.gz
+        dest: /usr/src
+        remote_src: yes
+
+    - name: Installation des Dynamic Kernel Module Support Framework und der Header Files für den Raspberry Pi Linux Kernel
+      apt:
+        update_cache: yes
+        pkg:
+          - dkms
+          - raspberrypi-kernel-headers
+        state: present
+
+    - name: Rebuild BATMAN Kernel Header Dateien
+      make:
+        chdir: /usr/src/linux-headers-{{ ansible_kernel }}
+        target: scripts
+      ignore_errors: yes
+
+    - name: Anlegen der dkms.conf für Dynamic Kernel Module Support
+      template:
+        src: Raspbian/dkms.j2
+        dest: /usr/src/batman-adv-{{ batman_adv_version }}/dkms.conf
+
+    - name: Dynamic Kernel Module Support hinzufügen
+      #become: yes
+      command: dkms add -m batman-adv -v {{ batman_adv_version }}
+      register: ret
+      failed_when: ret.rc != 0 and ret.rc != 3
+      changed_when: ret.rc == 0
+
+    - name: Dynamic Kernel Module Support bauen
+      #become: yes
+      command: dkms build -m batman-adv -v {{ batman_adv_version }}
+
+    - name: Dynamic Kernel Module Support installieren
+      #become: yes
+      command: dkms install -m batman-adv -v {{batman_adv_version }}
+
+    - name: Laden des Kernelmodul beim Booten veranlassen
+      template:
+        src: Raspbian/batman-adv.module.j2
+        dest: /etc/modules-load.d/batman-adv.module.conf
+
+    - name: Laden des BATMAN Moduls
+      #become: yes
+      modprobe:
+        name: batman_adv
+        state: present
+
+    - name: Laden des dummy Moduls
+      #become: yes
+      modprobe:
+        name: dummy
+        state: present
+
+    - name: Installation der  bridge-utils
+      apt:
+        update_cache: yes
+        pkg:
+         - batctl
+         - bridge-utils
+        state: present
+
+    - name: Aktivierung von BATMAN_V
+      shell: batctl ra BATMAN_V
+
+    - name: Konfiguration des Interfaces
+      template:
+        src: Raspbian/interfaces.j2
+        dest: /etc/network/interfaces
+
+    - name: Installation von FASTD
+      #become: yes
+      apt:
+        name: fastd
+        state: present
+
+    - name: Verzeichnis für fastd- Konfigurationsdatei anlegen
+      file: 
+        path: /etc/fastd/{{ ffmuc_segment }} 
+        state: directory
+
+    - name: Schlüssel für fastd erstellen
+      shell: fastd --generate-key > /root/fastd.key
+
+    - name: FASTD Secret Key aus /root/fastd.key in Variable übergeben
+      shell: grep Secret /root/fastd.key | awk '{print substr($0,9)}' 
+      register: secretkey_var
+
+    - name: FASTD Socket ermitteln
+      set_fact:
+        ffmuc_fast_port: "{{ item.value }}"
+      loop: "{{ lookup('dict', fastd_ports) }}"
+      when: "ffmuc_segment in item.key"
+
+    - name: Erstellen der fastd Konfigurationsdatei
+      template:
+        src: Raspbian/fastd.j2
+        dest: /etc/fastd/{{ ffmuc_segment }}/fastd.conf
+
+    - name: Service fastd beim Booten starten
+      systemd:
+        name: fastd@{{ ffmuc_segment }}
+        state: started
+        enabled: yes
+
+    - name: Installation der Pakete git und python3-netifaces
+      apt:
+        update_cache: yes
+        pkg:
+          - git
+          - python3-netifaces
+        state: present
+
+    - name: Repo ext-respondd klonen
+      git:
+        repo: https://github.com/freifunkMUC/ext-respondd 
+        dest: /opt/ext-respondd/
+
+    - name: Systemd Startdatei für respondd kopieren
+      shell: cp /opt/ext-respondd/ext-respondd.service.example /etc/systemd/system/ext-respondd.service
+
+    - name: Erstellen der resondd Konfigurationsdatei alias.json
+      template:
+        src: Raspbian/ext-respondd_alias.json.j2
+        dest: /opt/ext-respondd/alias.json
+
+    - name: Erstellen der resondd Konfigurationsdatei config.json
+      template:
+        src: Raspbian/ext-respondd_config.json.j2
+        dest: /opt/ext-respondd/config.json
+
+    - name: Service ext-respondd beim Booten starten
+      systemd:
+        name: ext-respondd
+        daemon_reload: yes
+        state: started
+        enabled: yes
+
+    - name: Paket hostapd für WLAN installieren
+      apt:
+        update_cache: yes
+        pkg:
+          - hostapd
+        state: present
+      when: ( raspberry_wifi == "ja" ) 
+
+    - name: hostapd konfigurieren
+      shell: echo 'DAEMON_OPTS="-d"' >> /etc/default/hostapd
+      when: ( raspberry_wifi == "ja" )
+
+    - name: hostapd Konfigurationsdatei anlegen  
+      template:
+        src: Raspbian/hostapd.j2 
+        dest: /etc/hostapd/hostapd.conf 
+      when: ( raspberry_wifi == "ja" )
+
+    - name: wlan0 in Bridge packen
+      template:
+        src: Raspbian/rclocal.j2
+        dest: /etc/rc.local
+      when: ( raspberry_wifi == "ja" )
+
+    - name: Service hostapd beim Booten und jetzt starten und das Laden der Unit Datei vom Service hostapd ermöglichen
+      systemd:
+        name: hostapd
+        enabled: yes
+        masked: no
+        state: started
+      when: ( raspberry_wifi == "ja" )
+
+    - name: Konfiguration des Client-VLAN ohne Mesh-Netz
+      template:
+        src: Raspbian/interfaces_client_ohne_mesh.j2
+        dest: /etc/network/interfaces 
+      when: ( raspberry_clientvlan|length > 0 ) and ( raspberry_meshvlan|length == 0 )
+
+    - name: vxlan_id für ausgewähltes Segment ermitteln
+      set_fact:
+        ffmuc_vxlan_id: "{{ item.value }}"
+      loop: "{{ lookup('dict', vxlan_ids) }}"
+      when: "ffmuc_segment in item.key"  
+
+    - name: Konfiguration des Mesh-VLAN ohne Client-VLAN
+      template:
+        src: Raspbian/interfaces_mesh_ohne_client.j2
+        dest: /etc/network/interfaces
+      when: ( raspberry_clientvlan|length == 0 ) and ( raspberry_meshvlan|length > 0 )
+
+    - name: Konfiguration von Mesh- und Client-VLAN
+      template:
+        src: Raspbian/interfaces_mesh_mit_client.j2
+        dest: /etc/network/interfaces
+      when: ( raspberry_clientvlan|length > 0 ) and ( raspberry_meshvlan|length > 0 )
+
+    - name: Konfiguration des bevorzugte Meshingpoint in BATMAN_V
+      shell: echo "echo 1000000 > /sys/devices/virtual/net/vxlan-mesh/batman_adv/throughput_override" >> /etc/rc.local
+      when: raspberry_meshvlan|length > 0       
+
+    - name: Reboot am Ende
+      reboot:
+ 
+... #YAML Ende Syntax
